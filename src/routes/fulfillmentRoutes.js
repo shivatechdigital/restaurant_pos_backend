@@ -1,0 +1,13 @@
+const express = require('express');
+const router = express.Router();
+const FulfillmentController = require('../controllers/fulfillmentController');
+const { authenticate, authorize } = require('../middleware/auth');
+router.use(authenticate, authorize('admin', 'waiter', 'reception'));
+router.get('/partners', FulfillmentController.getPartners);
+router.post('/partners', FulfillmentController.createPartner);
+router.post('/reservations', FulfillmentController.createReservation);
+router.get('/reservations', FulfillmentController.getReservations);
+router.post('/reservations/:id/check-in', FulfillmentController.checkInReservation);
+router.post('/delivery/:id/assign', FulfillmentController.assignDelivery);
+router.patch('/delivery/:id/status', FulfillmentController.updateDeliveryStatus);
+module.exports = router;
