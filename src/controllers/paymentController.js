@@ -252,8 +252,23 @@ class PaymentController {
                 }
             });
         } catch (error) {
-            console.error('Create session QR error:', error);
-            return res.status(502).json({ success: false, message: 'Razorpay QR could not be created' });
+            const providerError = error.error || {};
+            const errorCode = providerError.code || error.code;
+            const description = providerError.description || error.message;
+            const reason = providerError.reason;
+            console.error('Create session QR error:', {
+                code: errorCode,
+                statusCode: error.statusCode,
+                description,
+                reason
+            });
+
+            const message = providerError.description
+                ? `Razorpay: ${providerError.description}${reason ? ` (${reason})` : ''}`
+                : errorCode
+                    ? `QR payment setup failed (${errorCode}): ${description || 'check database permissions and quota'}`
+                    : description || 'QR payment setup failed; check backend logs';
+            return res.status(502).json({ success: false, message });
         }
     }
 
