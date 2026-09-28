@@ -106,8 +106,8 @@ class PaymentController {
             // Payment record database mein save karo (pending status)
             await query(
                 `INSERT INTO payments 
-                 (session_id, restaurant_id, razorpay_order_id, amount, payment_method, status, paid_by_phone)
-                 VALUES ($1, $2, $3, $4, $5, 'pending', $6)`,
+                 (session_id, order_id, restaurant_id, razorpay_order_id, amount, payment_method, status, paid_by_phone)
+                 VALUES ($1, (SELECT id FROM orders WHERE session_id = $1 ORDER BY placed_at DESC LIMIT 1), $2, $3, $4, $5, 'pending', $6)`,
                 [
                     session_id,
                     session.restaurant_id,

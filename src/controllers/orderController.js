@@ -17,6 +17,7 @@ class OrderController {
                 table_id,
                 restaurant_id,
                 order_type = 'dine-in',
+                payment_mode,
                 delivery_address,
                 delivery_landmark,
                 delivery_charge = 0,
@@ -46,6 +47,9 @@ class OrderController {
             }
             if (order_type === 'delivery' && !delivery_address?.trim()) {
                 return res.status(400).json({ success: false, message: 'Delivery address is required' });
+            }
+            if (order_type !== 'dine-in' && !['prepaid', 'cod'].includes(payment_mode)) {
+                return res.status(400).json({ success: false, message: 'A valid payment mode is required' });
             }
 
             // =============================================
@@ -206,6 +210,15 @@ class OrderController {
                     [subtotal, gstAmount, serviceCharge, finalAmount, pickupToken, delivery_address || null,
                         delivery_landmark || null, deliveryCharge, order_type === 'delivery' ? 'new' : null, order.id]
                 );
+
+                if (order_type !== 'dine-in' && payment_mode === 'cod') {
+                    await client.query(
+                        `INSERT INTO payments
+                         (session_id, order_id, restaurant_id, amount, payment_method, status, paid_by_phone)
+                         VALUES ($1, $2, $3, $4, 'cash', 'pending', $5)`,
+                        [sessionId, order.id, restaurant_id, finalAmount, customerPhone]
+                    );
+                }
 
                 // COMMIT — Sab kuch successful!
                 await client.query('COMMIT');
@@ -781,9 +794,18 @@ class OrderController {
             );
 
             const ordersResult = await query(
-                `SELECT o.*, COALESCE(t.table_number, UPPER(o.order_type)) AS table_number
+                `SELECT o.*, COALESCE(t.table_number, UPPER(o.order_type)) AS table_number,
+                        payment.payment_method, payment.status AS payment_status
                  FROM orders o
                  LEFT JOIN tables t ON o.table_id = t.id
+                 LEFT JOIN LATERAL (
+                     SELECT p.payment_method, p.status
+                     FROM payments p
+                     WHERE p.order_id = o.id
+                        OR (p.order_id IS NULL AND p.session_id = o.session_id)
+                     ORDER BY (p.order_id = o.id) DESC, p.created_at DESC, p.id DESC
+                     LIMIT 1
+                 ) payment ON TRUE
                  ${whereClause}
                  ORDER BY o.placed_at DESC
                  LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,

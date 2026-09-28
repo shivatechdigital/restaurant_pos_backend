@@ -19,13 +19,20 @@ class StaffController {
         try {
             const { name, phone, role } = req.body;
             const validRoles = ['admin', 'waiter', 'kitchen', 'reception'];
-            if (!name || !phone || !validRoles.includes(role)) {
+            const phoneDigits = String(phone || '').replace(/\D/g, '');
+            const normalizedPhone = phoneDigits.length === 12 && phoneDigits.startsWith('91')
+                ? phoneDigits.slice(2)
+                : phoneDigits;
+            if (!name || !validRoles.includes(role)) {
                 return res.status(400).json({ success: false, message: 'name, phone and a valid role are required' });
+            }
+            if (normalizedPhone.length !== 10) {
+                return res.status(400).json({ success: false, message: 'Phone number must contain 10 digits, with an optional +91 country code' });
             }
             const result = await query(
                 `INSERT INTO users (name, phone, role, restaurant_id)
                  VALUES ($1, $2, $3, $4) RETURNING id, name, phone, role, is_active, created_at`,
-                [name.trim(), phone.trim(), role, req.user.restaurant_id]
+                [name.trim(), normalizedPhone, role, req.user.restaurant_id]
             );
             await AuditService.log({ restaurantId: req.user.restaurant_id, actor: req.user, action: 'staff_created', entityType: 'user', entityId: result.rows[0].id, details: { role } });
             return res.status(201).json({ success: true, data: result.rows[0] });
