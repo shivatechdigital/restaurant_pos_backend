@@ -216,7 +216,12 @@ class TableController {
                     ORDER BY started_at DESC LIMIT 1
                  ) s ON TRUE
                  WHERE t.restaurant_id = $1 AND (t.is_active IS NULL OR t.is_active = TRUE)
-                 ORDER BY table_number`,
+                 ORDER BY regexp_replace(table_number, '[0-9]+$', ''),
+                          CASE
+                              WHEN table_number ~ '[0-9]+$'
+                              THEN substring(table_number FROM '[0-9]+$')::INT
+                          END NULLS LAST,
+                          table_number`,
                 [restaurant_id]
             );
 

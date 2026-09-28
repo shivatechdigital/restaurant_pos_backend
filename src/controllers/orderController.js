@@ -682,6 +682,7 @@ class OrderController {
             let totalServiceCharge = 0;
             let totalFinal = 0;
             const allItems = [];
+            const billOrders = [];
 
             for (let order of ordersResult.rows) {
                 const itemsResult = await query(
@@ -697,7 +698,20 @@ class OrderController {
                     [order.id]
                 );
 
-                allItems.push(...itemsResult.rows);
+                const orderItems = itemsResult.rows.map(item => ({
+                    ...item,
+                    order_id: order.id,
+                    customer_name: order.ordered_by_name || 'Customer',
+                    customer_phone: order.ordered_by_phone || ''
+                }));
+                allItems.push(...orderItems);
+                billOrders.push({
+                    order_id: order.id,
+                    customer_name: order.ordered_by_name || 'Customer',
+                    customer_phone: order.ordered_by_phone || '',
+                    placed_at: order.placed_at,
+                    items: orderItems
+                });
                 totalSubtotal += parseFloat(order.subtotal);
                 totalGST += parseFloat(order.gst_amount);
                 totalServiceCharge += parseFloat(order.service_charge);
@@ -706,9 +720,10 @@ class OrderController {
 
             // Table info
             const sessionResult = await query(
-                `SELECT s.*, t.table_number 
+                `SELECT s.*, t.table_number, r.name AS restaurant_name
                  FROM order_sessions s
                  JOIN tables t ON s.table_id = t.id
+                 JOIN restaurants r ON r.id = s.restaurant_id
                  WHERE s.id = $1`,
                 [session_id]
             );
@@ -723,6 +738,9 @@ class OrderController {
             const bill = {
                 session_id: parseInt(session_id),
                 table_number: sessionResult.rows[0]?.table_number,
+                restaurant_name: sessionResult.rows[0]?.restaurant_name,
+                host_phone: sessionResult.rows[0]?.host_phone,
+                orders: billOrders,
                 items: allItems,
                 summary: {
                     subtotal: parseFloat(totalSubtotal.toFixed(2)),

@@ -5,6 +5,7 @@ const { authenticate, authorize } = require('../middleware/auth');
 
 // Customer payment initiate karega
 router.post('/create', authenticate, PaymentController.createPaymentOrder);
+router.post('/session-qr', authenticate, authorize('admin', 'waiter', 'reception'), PaymentController.createSessionQr);
 
 // Customer payment verify karega (Razorpay SDK ke baad)
 router.post('/verify', authenticate, PaymentController.verifyPayment);

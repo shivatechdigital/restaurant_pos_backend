@@ -17,6 +17,10 @@ function signaturesMatch(expected, received) {
 }
 
 class PaymentController {
+    static async ensureQrPaymentColumn() {
+        await query('ALTER TABLE payments ADD COLUMN IF NOT EXISTS razorpay_qr_code_id VARCHAR(100)');
+    }
+
     static async settleSessionIfComplete(sessionId) {
         const balanceResult = await query(
             `SELECT
@@ -145,6 +149,111 @@ class PaymentController {
                 success: false,
                 message: 'Failed to create payment order'
             });
+        }
+    }
+
+    static async createSessionQr(req, res) {
+        try {
+            await PaymentController.ensureQrPaymentColumn();
+            const { session_id } = req.body;
+            const sessionResult = await query(
+                `SELECT s.id, s.restaurant_id, s.table_id, t.table_number, r.name AS restaurant_name
+                 FROM order_sessions s
+                 JOIN tables t ON t.id = s.table_id
+                 JOIN restaurants r ON r.id = s.restaurant_id
+                 WHERE s.id = $1 AND s.restaurant_id = $2 AND s.status = 'active'`,
+                [session_id, req.user.restaurant_id]
+            );
+            if (sessionResult.rows.length === 0) {
+                return res.status(404).json({ success: false, message: 'Active table session not found' });
+            }
+
+            const balanceResult = await query(
+                `SELECT
+                    COALESCE((SELECT SUM(final_amount) FROM orders WHERE session_id = $1 AND status != 'cancelled'), 0) AS total,
+                    COALESCE((SELECT SUM(amount) FROM payments WHERE session_id = $1 AND status = 'success'), 0) AS paid`,
+                [session_id]
+            );
+            const outstanding = Math.max(0, parseFloat(balanceResult.rows[0].total) - parseFloat(balanceResult.rows[0].paid));
+            if (outstanding <= 0.01) {
+                return res.status(400).json({ success: false, message: 'This bill is already settled' });
+            }
+
+            const pendingQrResult = await query(
+                `SELECT id, razorpay_qr_code_id, amount
+                 FROM payments
+                 WHERE session_id = $1 AND status = 'pending'
+                   AND razorpay_qr_code_id IS NOT NULL
+                 ORDER BY created_at DESC`,
+                [session_id]
+            );
+            for (const pendingQr of pendingQrResult.rows) {
+                try {
+                    const existingQr = await razorpay.qrCode.fetch(pendingQr.razorpay_qr_code_id);
+                    const sameAmount = Math.abs(parseFloat(pendingQr.amount) - outstanding) <= 0.01;
+                    if (existingQr.status === 'active' && sameAmount) {
+                        return res.status(200).json({
+                            success: true,
+                            data: {
+                                qr_code_id: existingQr.id,
+                                image_url: existingQr.image_url,
+                                amount: outstanding,
+                                currency: 'INR',
+                                session_id: Number(session_id),
+                                expires_at: existingQr.close_by
+                            }
+                        });
+                    }
+                    if (existingQr.status === 'active') {
+                        await razorpay.qrCode.close(existingQr.id);
+                    }
+                } catch (qrError) {
+                    console.warn('Could not reuse/close old Razorpay QR:', qrError.message);
+                    return res.status(502).json({ success: false, message: 'Existing Razorpay QR status could not be verified; retry shortly' });
+                }
+                await query(
+                    `UPDATE payments SET status = 'failed'
+                     WHERE id = $1 AND status = 'pending'`,
+                    [pendingQr.id]
+                );
+            }
+
+            const qrCode = await razorpay.qrCode.create({
+                type: 'upi_qr',
+                name: `Table ${sessionResult.rows[0].table_number}`,
+                usage: 'single_use',
+                fixed_amount: true,
+                payment_amount: Math.round(outstanding * 100),
+                description: `Restaurant bill for table ${sessionResult.rows[0].table_number}`,
+                close_by: Math.floor(Date.now() / 1000) + 3600,
+                notes: {
+                    session_id: String(session_id),
+                    restaurant_id: String(req.user.restaurant_id),
+                    table_number: String(sessionResult.rows[0].table_number)
+                }
+            });
+
+            await query(
+                `INSERT INTO payments
+                 (session_id, order_id, restaurant_id, razorpay_qr_code_id, amount, payment_method, status, paid_by_phone)
+                 VALUES ($1, (SELECT id FROM orders WHERE session_id = $1 ORDER BY placed_at DESC LIMIT 1), $2, $3, $4, 'upi', 'pending', $5)`,
+                [session_id, req.user.restaurant_id, qrCode.id, outstanding, req.user.phone]
+            );
+
+            return res.status(201).json({
+                success: true,
+                data: {
+                    qr_code_id: qrCode.id,
+                    image_url: qrCode.image_url,
+                    amount: outstanding,
+                    currency: 'INR',
+                    session_id: Number(session_id),
+                    expires_at: qrCode.close_by
+                }
+            });
+        } catch (error) {
+            console.error('Create session QR error:', error);
+            return res.status(502).json({ success: false, message: 'Razorpay QR could not be created' });
         }
     }
 
@@ -312,6 +421,43 @@ class PaymentController {
 
                 if (paymentRecord.rows.length > 0) {
                     await PaymentController.settleSessionIfComplete(paymentRecord.rows[0].session_id);
+                }
+            } else if (event === 'qr_code.credited') {
+                const paymentData = payload.payment?.entity;
+                const qrCodeId = payload.qr_code?.entity?.id;
+                if (paymentData && qrCodeId) {
+                    await PaymentController.ensureQrPaymentColumn();
+                    const updated = await query(
+                        `UPDATE payments
+                         SET razorpay_payment_id = $1, status = 'success', paid_at = NOW()
+                         WHERE razorpay_qr_code_id = $2 AND status = 'pending'
+                           AND amount = $3
+                         RETURNING id, session_id, restaurant_id, amount`,
+                        [paymentData.id, qrCodeId, paymentData.amount / 100]
+                    );
+                    if (updated.rows.length > 0) {
+                        const payment = updated.rows[0];
+                        const settlement = await PaymentController.settleSessionIfComplete(payment.session_id);
+                        const io = req.app.get('io');
+                        if (io && settlement.settled && settlement.session?.table_id) {
+                            io.to(`table_${settlement.session.table_id}`).emit('payment_success', {
+                                payment_id: paymentData.id,
+                                amount: payment.amount
+                            });
+                            io.to(`restaurant_${payment.restaurant_id}`).emit('table_status_changed', {
+                                table_id: settlement.session.table_id,
+                                status: 'available'
+                            });
+                        }
+                        await AuditService.log({
+                            restaurantId: payment.restaurant_id,
+                            actor: null,
+                            action: 'razorpay_qr_payment_verified',
+                            entityType: 'payment',
+                            entityId: payment.id,
+                            details: { session_id: payment.session_id, amount: payment.amount, settled: settlement.settled }
+                        });
+                    }
                 }
             }
 
