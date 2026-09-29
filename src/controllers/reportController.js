@@ -55,7 +55,7 @@ class ReportController {
 
     static async getDailySummary(restaurantId, date, timezone) {
         const salesResult = await query(
-            `SELECT COUNT(*) AS total_orders, COALESCE(SUM(final_amount), 0) AS total_sales,
+            `SELECT COUNT(DISTINCT COALESCE(session_id, -id)) AS total_orders, COALESCE(SUM(final_amount), 0) AS total_sales,
                     COALESCE(SUM(subtotal), 0) AS subtotal, COALESCE(SUM(gst_amount), 0) AS gst,
                     COALESCE(SUM(service_charge), 0) AS service_charge
              FROM orders WHERE restaurant_id = $1 AND (placed_at AT TIME ZONE $3)::date = $2::date AND status != 'cancelled'`,
@@ -354,20 +354,25 @@ class ReportController {
         try {
             const restaurant_id = req.user.restaurant_id;
 
-            // Aaj ki date
-            const today = new Date().toISOString().split('T')[0];
+            const timezone = await ReportController.getRestaurantTimezone(restaurant_id);
+            const today = await ReportController.getCurrentBusinessDate(restaurant_id);
 
             // 1. Today's Total Revenue
             const revenueResult = await query(
-                `SELECT 
-                    COALESCE(SUM(o.final_amount), 0) as total_revenue,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    COALESCE(AVG(o.final_amount), 0) as avg_order_value
-                 FROM orders o
-                 WHERE o.restaurant_id = $1 
-                 AND DATE(o.placed_at) = $2
-                 AND o.status != 'cancelled'`,
-                [restaurant_id, today]
+                  `WITH session_sales AS (
+                      SELECT COALESCE(o.session_id, -o.id) AS session_key,
+                          SUM(o.final_amount) AS total
+                      FROM orders o
+                      WHERE o.restaurant_id = $1
+                     AND (o.placed_at AT TIME ZONE $3)::date = $2::date
+                     AND o.status != 'cancelled'
+                      GROUP BY COALESCE(o.session_id, -o.id)
+                   )
+                   SELECT COALESCE(SUM(total), 0) AS total_revenue,
+                       COUNT(*) AS total_orders,
+                       COALESCE(AVG(total), 0) AS avg_order_value
+                   FROM session_sales`,
+                  [restaurant_id, today, timezone]
             );
 
             // 2. Payment Method Breakdown
@@ -398,7 +403,7 @@ class ReportController {
 
             // 4. Active Orders Count
             const activeOrders = await query(
-                `SELECT COUNT(*) as count 
+                `SELECT COUNT(DISTINCT COALESCE(session_id, -id)) as count
                  FROM orders 
                  WHERE restaurant_id = $1 
                  AND status IN ('placed', 'accepted', 'preparing', 'ready')`,
@@ -407,25 +412,45 @@ class ReportController {
 
             // 5. Hourly Sales Graph (Aaj ke har ghante ki sale)
             const hourlySales = await query(
-                `SELECT 
-                    EXTRACT(HOUR FROM placed_at) as hour,
-                    COUNT(*) as orders,
-                    SUM(final_amount) as revenue
-                 FROM orders
-                 WHERE restaurant_id = $1 
-                 AND DATE(placed_at) = $2
-                 AND status != 'cancelled'
-                 GROUP BY EXTRACT(HOUR FROM placed_at)
-                 ORDER BY hour ASC`,
-                [restaurant_id, today]
+                     `WITH today_orders AS (
+                          SELECT o.id, COALESCE(o.session_id, -o.id) AS session_key,
+                                    o.placed_at, o.final_amount
+                          FROM orders o
+                          WHERE o.restaurant_id = $1
+                             AND (o.placed_at AT TIME ZONE $3)::date = $2::date
+                             AND o.status != 'cancelled'
+                      ), session_starts AS (
+                          SELECT session_key, MIN(placed_at) AS first_placed_at
+                          FROM today_orders
+                          GROUP BY session_key
+                      ), hourly_revenue AS (
+                          SELECT EXTRACT(HOUR FROM (placed_at AT TIME ZONE $3))::int AS hour,
+                                    SUM(final_amount) AS revenue
+                          FROM today_orders
+                          GROUP BY EXTRACT(HOUR FROM (placed_at AT TIME ZONE $3))
+                      ), hourly_orders AS (
+                          SELECT EXTRACT(HOUR FROM (first_placed_at AT TIME ZONE $3))::int AS hour,
+                                    COUNT(*) AS orders
+                          FROM session_starts
+                          GROUP BY EXTRACT(HOUR FROM (first_placed_at AT TIME ZONE $3))
+                      )
+                      SELECT COALESCE(r.hour, s.hour) AS hour,
+                                COALESCE(s.orders, 0) AS orders,
+                                COALESCE(r.revenue, 0) AS revenue
+                      FROM hourly_revenue r
+                      FULL OUTER JOIN hourly_orders s ON r.hour = s.hour
+                      ORDER BY hour ASC`,
+                     [restaurant_id, today, timezone]
             );
 
             const orderTypes = await query(
-                `SELECT order_type, COUNT(*) AS count
-                 FROM orders
-                 WHERE restaurant_id = $1 AND DATE(placed_at) = $2 AND status != 'cancelled'
-                 GROUP BY order_type ORDER BY order_type`,
-                [restaurant_id, today]
+                                `SELECT order_type, COUNT(DISTINCT COALESCE(session_id, -id)) AS count
+                                 FROM orders
+                                 WHERE restaurant_id = $1
+                                     AND (placed_at AT TIME ZONE $3)::date = $2::date
+                                     AND status != 'cancelled'
+                                 GROUP BY order_type ORDER BY order_type`,
+                                [restaurant_id, today, timezone]
             );
 
             return res.status(200).json({

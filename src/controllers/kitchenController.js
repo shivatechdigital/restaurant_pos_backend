@@ -2,21 +2,43 @@ const { query } = require('../config/db');
 
 class KitchenController {
 
+    static async getBusinessDate(restaurantId) {
+        const timezoneResult = await query(
+            `SELECT COALESCE(timezone, 'Asia/Kolkata') AS timezone FROM restaurants WHERE id = $1`,
+            [restaurantId]
+        );
+        const timezone = timezoneResult.rows[0]?.timezone || 'Asia/Kolkata';
+        const dateResult = await query(
+            `SELECT TO_CHAR(NOW() AT TIME ZONE $1, 'YYYY-MM-DD') AS business_date`,
+            [timezone]
+        );
+        return { date: dateResult.rows[0].business_date, timezone };
+    }
+
     // =============================================
     // KITCHEN STATS (Aaj ka poora data)
     // =============================================
     static async getStats(req, res) {
         try {
             const restaurant_id = req.user.restaurant_id;
-            const today = new Date().toISOString().split('T')[0];
+            const { date: today, timezone } = await KitchenController.getBusinessDate(restaurant_id);
 
             // 1. Today's Order Counts by Status
             const statusCounts = await query(
                 `SELECT status, COUNT(*) as count
                  FROM orders
-                 WHERE restaurant_id = $1 AND DATE(placed_at) = $2
+                 WHERE restaurant_id = $1 AND (placed_at AT TIME ZONE $3)::date = $2::date
                  GROUP BY status`,
-                [restaurant_id, today]
+                [restaurant_id, today, timezone]
+            );
+
+            const totalOrders = await query(
+                `SELECT COUNT(DISTINCT COALESCE(session_id, -id)) AS count
+                 FROM orders
+                 WHERE restaurant_id = $1
+                   AND (placed_at AT TIME ZONE $3)::date = $2::date
+                   AND status != 'cancelled'`,
+                [restaurant_id, today, timezone]
             );
 
             // 2. Average Prep Time (placed -> served)
@@ -27,22 +49,22 @@ class KitchenController {
                     MAX(EXTRACT(EPOCH FROM (served_at - placed_at)) / 60) as slowest
                  FROM orders
                  WHERE restaurant_id = $1 
-                 AND DATE(placed_at) = $2
+                 AND (placed_at AT TIME ZONE $3)::date = $2::date
                  AND status = 'served'
                  AND served_at IS NOT NULL`,
-                [restaurant_id, today]
+                [restaurant_id, today, timezone]
             );
 
             // 3. Hourly Order Distribution (Peak hours)
             const hourlyOrders = await query(
                 `SELECT 
-                    EXTRACT(HOUR FROM placed_at) as hour,
+                    EXTRACT(HOUR FROM (placed_at AT TIME ZONE $3)) as hour,
                     COUNT(*) as orders
                  FROM orders
-                 WHERE restaurant_id = $1 AND DATE(placed_at) = $2
-                 GROUP BY EXTRACT(HOUR FROM placed_at)
+                 WHERE restaurant_id = $1 AND (placed_at AT TIME ZONE $3)::date = $2::date
+                 GROUP BY EXTRACT(HOUR FROM (placed_at AT TIME ZONE $3))
                  ORDER BY hour ASC`,
-                [restaurant_id, today]
+                [restaurant_id, today, timezone]
             );
 
             // 4. Most Ordered Items Today
@@ -53,12 +75,12 @@ class KitchenController {
                  FROM order_items oi
                  JOIN orders o ON oi.order_id = o.id
                  WHERE o.restaurant_id = $1 
-                 AND DATE(o.placed_at) = $2
+                 AND (o.placed_at AT TIME ZONE $3)::date = $2::date
                  AND oi.status != 'cancelled'
                  GROUP BY oi.item_name
                  ORDER BY total_qty DESC
                  LIMIT 5`,
-                [restaurant_id, today]
+                [restaurant_id, today, timezone]
             );
 
             // 5. Late Orders Count (>15 min)
@@ -66,10 +88,10 @@ class KitchenController {
                 `SELECT COUNT(*) as count
                  FROM orders
                  WHERE restaurant_id = $1 
-                 AND DATE(placed_at) = $2
+                 AND (placed_at AT TIME ZONE $3)::date = $2::date
                  AND status IN ('placed', 'accepted', 'preparing')
                  AND placed_at < NOW() - INTERVAL '15 minutes'`,
-                [restaurant_id, today]
+                [restaurant_id, today, timezone]
             );
 
             // 6. Total Revenue Today
@@ -77,15 +99,16 @@ class KitchenController {
                 `SELECT COALESCE(SUM(final_amount), 0) as total
                  FROM orders
                  WHERE restaurant_id = $1 
-                 AND DATE(placed_at) = $2
+                 AND (placed_at AT TIME ZONE $3)::date = $2::date
                  AND status != 'cancelled'`,
-                [restaurant_id, today]
+                [restaurant_id, today, timezone]
             );
 
             return res.status(200).json({
                 success: true,
                 data: {
                     date: today,
+                    total_orders: parseInt(totalOrders.rows[0].count),
                     status_counts: statusCounts.rows,
                     avg_prep_time: {
                         avg_minutes: parseFloat(parseFloat(avgPrepTime.rows[0]?.avg_minutes || 0).toFixed(1)),
@@ -119,9 +142,10 @@ class KitchenController {
             const restaurant_id = req.user.restaurant_id;
             const { date, status, limit = 20, page = 1 } = req.query;
 
-            const targetDate = date || new Date().toISOString().split('T')[0];
+            const businessDate = await KitchenController.getBusinessDate(restaurant_id);
+            const targetDate = date || businessDate.date;
             const offset = (parseInt(page) - 1) * parseInt(limit);
-            const params = [restaurant_id, targetDate];
+            const params = [restaurant_id, targetDate, businessDate.timezone];
 
             let statusFilter = "AND o.status IN ('served', 'cancelled')";
             if (status) {
@@ -135,7 +159,8 @@ class KitchenController {
             const result = await query(
                 `SELECT 
                     o.id, o.status, o.final_amount, o.placed_at, o.served_at,
-                    o.ordered_by_name, t.table_number,
+                    o.ordered_by_name, waiter.name AS waiter_name,
+                    COALESCE(t.table_number, UPPER(o.order_type)) AS table_number,
                     EXTRACT(EPOCH FROM (o.served_at - o.placed_at)) / 60 as prep_time_minutes,
                     (
                         SELECT json_agg(
@@ -145,9 +170,10 @@ class KitchenController {
                         WHERE oi.order_id = o.id AND oi.status != 'cancelled'
                     ) as items
                  FROM orders o
-                 JOIN tables t ON o.table_id = t.id
+                 LEFT JOIN tables t ON o.table_id = t.id
+                 LEFT JOIN users waiter ON waiter.id = o.waiter_id
                  WHERE o.restaurant_id = $1 
-                 AND DATE(o.placed_at) = $2
+                 AND (o.placed_at AT TIME ZONE $3)::date = $2::date
                  ${statusFilter}
                  ORDER BY o.placed_at DESC
                  LIMIT $${limitParam} OFFSET $${offsetParam}`,
@@ -157,7 +183,7 @@ class KitchenController {
             const countResult = await query(
                 `SELECT COUNT(*) FROM orders o
                  WHERE o.restaurant_id = $1 
-                 AND DATE(o.placed_at) = $2
+                 AND (o.placed_at AT TIME ZONE $3)::date = $2::date
                  ${statusFilter}`,
                 params
             );
@@ -172,6 +198,7 @@ class KitchenController {
                         status: r.status,
                         table_number: r.table_number,
                         customer: r.ordered_by_name,
+                        waiter_name: r.waiter_name,
                         amount: parseFloat(r.final_amount),
                         placed_at: r.placed_at,
                         served_at: r.served_at,

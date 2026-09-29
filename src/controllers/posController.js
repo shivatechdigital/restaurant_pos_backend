@@ -95,13 +95,14 @@ class POSController {
 
             const orderResult = await client.query(
                 `INSERT INTO orders
-                 (session_id, table_id, restaurant_id, ordered_by_phone, ordered_by_name, order_type, notes, discount_amount)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 (session_id, table_id, restaurant_id, waiter_id, ordered_by_phone, ordered_by_name, order_type, notes, discount_amount)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  RETURNING *`,
                 [
                     sessionId,
                     table_id || null,
                     restaurant_id,
+                    req.user?.role === 'waiter' ? req.user.id : null,
                     customer_phone || req.user.phone || 'pos',
                     customer_name || 'Counter Customer',
                     order_type,
@@ -247,6 +248,42 @@ class POSController {
             const restaurant_id = req.user.restaurant_id;
             const { order_id } = req.params;
             const data = await POSController.getPrintableOrder(order_id, restaurant_id);
+            const sessionId = data.order.session_id;
+            if (sessionId) {
+                const [itemsResult, summaryResult] = await Promise.all([
+                    query(
+                        `SELECT oi.item_name, SUM(oi.quantity)::int AS quantity, oi.unit_price,
+                                SUM(oi.total_price) AS total_price
+                         FROM order_items oi
+                         JOIN orders o ON o.id = oi.order_id
+                         WHERE o.session_id = $1 AND o.restaurant_id = $2
+                           AND o.status != 'cancelled' AND oi.status != 'cancelled'
+                         GROUP BY oi.item_name, oi.unit_price
+                         ORDER BY MIN(oi.id)`,
+                        [sessionId, restaurant_id]
+                    ),
+                    query(
+                        `SELECT MIN(placed_at) AS placed_at,
+                                COALESCE(SUM(subtotal), 0) AS subtotal,
+                                COALESCE(SUM(gst_amount), 0) AS gst,
+                                COALESCE(SUM(service_charge), 0) AS service_charge,
+                                COALESCE(SUM(discount_amount), 0) AS discount,
+                                COALESCE(SUM(final_amount), 0) AS final_amount
+                         FROM orders
+                         WHERE session_id = $1 AND restaurant_id = $2 AND status != 'cancelled'`,
+                        [sessionId, restaurant_id]
+                    )
+                ]);
+                const sessionSummary = summaryResult.rows[0];
+                data.items = itemsResult.rows;
+                data.order.placed_at = sessionSummary.placed_at;
+                data.summary = Object.fromEntries(
+                    Object.entries(sessionSummary).map(([key, value]) => [
+                        key,
+                        key === 'placed_at' ? value : parseFloat(value)
+                    ])
+                );
+            }
             return res.status(200).json({ success: true, data: { type: 'BILL', ...data } });
         } catch (error) {
             console.error('POS bill error:', error);
@@ -280,6 +317,7 @@ class POSController {
         return {
             order: {
                 id: order.id,
+                session_id: order.session_id,
                 order_type: order.order_type,
                 status: order.status,
                 table_number: order.table_number || 'TAKEAWAY',

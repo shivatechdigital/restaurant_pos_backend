@@ -32,6 +32,7 @@ const PrinterService = require('./services/printerService');
 const LoyaltyService = require('./services/loyaltyService');
 const AuditService = require('./services/auditService');
 const RoleService = require('./services/roleService');
+const { query } = require('./config/db');
 
 // Services import
 const TableAutoReleaseService = require('./services/tableAutoRelease');  // ← NAYA
@@ -185,6 +186,8 @@ const PORT = process.env.PORT || 3000;
 
 async function startServer() {
     try {
+        await query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS timezone VARCHAR(64) DEFAULT 'Asia/Kolkata'`);
+        await query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS waiter_id INT REFERENCES users(id) ON DELETE SET NULL`);
         await InventoryController.ensureTable();
         await DiscountController.ensureTable();
         await FulfillmentController.ensureTables();

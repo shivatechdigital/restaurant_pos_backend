@@ -15,9 +15,12 @@ const createTables = async () => {
                 phone VARCHAR(15) UNIQUE,
                 gst_number VARCHAR(20),
                 service_charge_percent DECIMAL(5,2) DEFAULT 0,
+                timezone VARCHAR(64) DEFAULT 'Asia/Kolkata',
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             );
+
+            ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS timezone VARCHAR(64) DEFAULT 'Asia/Kolkata';
 
             -- =============================================
             -- 2. USERS (Admin, Waiter, Kitchen Staff)
@@ -111,6 +114,7 @@ const createTables = async () => {
                 session_id INT REFERENCES order_sessions(id),
                 table_id INT REFERENCES tables(id),
                 restaurant_id INT REFERENCES restaurants(id),
+                waiter_id INT REFERENCES users(id) ON DELETE SET NULL,
                 ordered_by_phone VARCHAR(15),
                 ordered_by_name VARCHAR(100),
                 order_type VARCHAR(20) DEFAULT 'dine-in'
@@ -127,6 +131,8 @@ const createTables = async () => {
                 accepted_at TIMESTAMPTZ,
                 served_at TIMESTAMPTZ
             );
+
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS waiter_id INT REFERENCES users(id) ON DELETE SET NULL;
 
             -- =============================================
             -- 9. ORDER ITEMS

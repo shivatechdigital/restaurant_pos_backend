@@ -95,11 +95,11 @@ class OrderController {
 
                 // Step 2: Order create karo
                 const orderResult = await client.query(
-                    `INSERT INTO orders 
-                     (session_id, table_id, restaurant_id, ordered_by_phone, ordered_by_name, order_type, notes)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    `INSERT INTO orders
+                     (session_id, table_id, restaurant_id, waiter_id, ordered_by_phone, ordered_by_name, order_type, notes)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                      RETURNING *`,
-                    [sessionId, table_id || null, restaurant_id, customerPhone, customerName, order_type, notes]
+                    [sessionId, table_id || null, restaurant_id, req.user?.role === 'waiter' ? req.user.id : null, customerPhone, customerName, order_type, notes]
                 );
 
                 const order = orderResult.rows[0];
@@ -481,10 +481,15 @@ class OrderController {
             const restaurant_id = req.user.restaurant_id;
             const { status, include_served } = req.query; // Filter by status
 
-            const params = [restaurant_id];
+            const timezoneResult = await query(
+                `SELECT COALESCE(timezone, 'Asia/Kolkata') AS timezone FROM restaurants WHERE id = $1`,
+                [restaurant_id]
+            );
+            const timezone = timezoneResult.rows[0]?.timezone || 'Asia/Kolkata';
+            const params = [restaurant_id, timezone];
             let statusFilter = include_served === 'true'
-                ? `AND o.status IN ('pending', 'placed', 'accepted', 'preparing', 'ready', 'served', 'cancelled')`
-                : `AND o.status IN ('pending', 'placed', 'accepted', 'preparing', 'ready', 'cancelled')`;
+                ? `AND o.status IN ('pending', 'placed', 'accepted', 'preparing', 'ready', 'served')`
+                : `AND o.status IN ('pending', 'placed', 'accepted', 'preparing', 'ready')`;
 
             if (status) {
                 params.push(status);
@@ -498,6 +503,7 @@ class OrderController {
                         o.restaurant_id,
                         o.ordered_by_phone,
                         o.ordered_by_name,
+                        waiter.name AS waiter_name,
                         o.order_type,
                         o.status,
                         COALESCE(o.subtotal, 0) AS subtotal,
@@ -513,7 +519,10 @@ class OrderController {
                         FLOOR(EXTRACT(EPOCH FROM (NOW() - o.placed_at)) / 60)::INT AS minutes_ago
                  FROM orders o
                  LEFT JOIN tables t ON o.table_id = t.id
-                 WHERE o.restaurant_id = $1 ${statusFilter}
+                 LEFT JOIN users waiter ON waiter.id = o.waiter_id
+                                 WHERE o.restaurant_id = $1
+                                     AND (o.placed_at AT TIME ZONE $2)::date = (NOW() AT TIME ZONE $2)::date
+                                     ${statusFilter}
                  ORDER BY o.placed_at ASC`,
                 params
             );
@@ -664,8 +673,10 @@ class OrderController {
 
             // Session ke saare orders fetch karo
             const ordersResult = await query(
-                `SELECT * FROM orders 
-                 WHERE session_id = $1 AND status != 'cancelled'
+                `SELECT o.*, waiter.name AS waiter_name
+                 FROM orders o
+                 LEFT JOIN users waiter ON waiter.id = o.waiter_id
+                 WHERE o.session_id = $1 AND o.status != 'cancelled'
                  ORDER BY placed_at ASC`,
                 [session_id]
             );
@@ -709,6 +720,7 @@ class OrderController {
                     order_id: order.id,
                     customer_name: order.ordered_by_name || 'Customer',
                     customer_phone: order.ordered_by_phone || '',
+                    waiter_name: order.waiter_name || null,
                     placed_at: order.placed_at,
                     items: orderItems
                 });
@@ -812,10 +824,12 @@ class OrderController {
             );
 
             const ordersResult = await query(
-                `SELECT o.*, COALESCE(t.table_number, UPPER(o.order_type)) AS table_number,
+                `SELECT o.*, waiter.name AS waiter_name,
+                    COALESCE(t.table_number, UPPER(o.order_type)) AS table_number,
                         payment.payment_method, payment.status AS payment_status
                  FROM orders o
                  LEFT JOIN tables t ON o.table_id = t.id
+                 LEFT JOIN users waiter ON waiter.id = o.waiter_id
                  LEFT JOIN LATERAL (
                      SELECT p.payment_method, p.status
                      FROM payments p
