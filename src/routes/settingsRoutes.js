@@ -4,7 +4,8 @@ const SettingsController = require('../controllers/settingsController');
 const { authenticate, authorize } = require('../middleware/auth');
 
 // Public route for customer app (dynamic restaurant info by id or query)
-router.get('/public-restaurant/:id?', SettingsController.getPublicRestaurantInfo);
+router.get('/public-restaurant', SettingsController.getPublicRestaurantInfo);
+router.get('/public-restaurant/:id', SettingsController.getPublicRestaurantInfo);
 
 // Kitchen & Cancellation Order Policy
 router.get('/order-policy', authenticate, SettingsController.getSettings);
