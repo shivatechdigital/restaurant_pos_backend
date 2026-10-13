@@ -97,6 +97,58 @@ class TableController {
         }
     }
 
+    // Companion room PIN se existing active table session join kare
+    static async joinTable(req, res) {
+        try {
+            const { table_id, restaurant_id, phone, room_code } = req.body;
+            if (!table_id || !restaurant_id || !phone || !room_code) {
+                return res.status(400).json({ success: false, message: 'Table, phone, and room code are required' });
+            }
+            if (!/^\d{10}$/.test(String(phone)) || !/^\d{4}$/.test(String(room_code))) {
+                return res.status(400).json({ success: false, message: 'Enter a valid phone number and 4-digit room code' });
+            }
+
+            const result = await query(
+                `SELECT t.id AS table_id, t.table_number, t.restaurant_id,
+                        s.id AS session_id, s.room_code
+                 FROM tables t
+                 JOIN order_sessions s
+                   ON s.table_id = t.id
+                  AND s.restaurant_id = t.restaurant_id
+                  AND s.room_code = t.room_code
+                  AND s.status = 'active'
+                 WHERE t.id = $1
+                   AND t.restaurant_id = $2
+                   AND t.status = 'occupied'
+                   AND t.room_code = $3
+                 ORDER BY s.started_at DESC
+                 LIMIT 1`,
+                [table_id, restaurant_id, String(room_code)]
+            );
+
+            if (result.rows.length === 0) {
+                return res.status(403).json({ success: false, message: 'Invalid room code or the table session has ended' });
+            }
+
+            const session = result.rows[0];
+            return res.status(200).json({
+                success: true,
+                message: 'Joined the table session',
+                data: {
+                    table_id: session.table_id,
+                    table_number: session.table_number,
+                    restaurant_id: session.restaurant_id,
+                    session_id: session.session_id,
+                    room_code: session.room_code,
+                    token: issueCustomerToken(String(phone), session.restaurant_id)
+                }
+            });
+        } catch (error) {
+            console.error('Join Table Error:', error);
+            return res.status(500).json({ success: false, message: 'Unable to join this table' });
+        }
+    }
+
     // OTP verify karke table LOCK karo
     static async lockTable(req, res) {
         try {

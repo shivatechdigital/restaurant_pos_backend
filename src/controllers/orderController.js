@@ -84,6 +84,29 @@ class OrderController {
                          WHERE id = $3 AND status = 'available'`,
                         [customerPhone, roomCode, table_id]
                     );
+                } else if (sessionId && order_type === 'dine-in') {
+                    const activeSession = await client.query(
+                        `SELECT s.id
+                         FROM order_sessions s
+                         JOIN tables t
+                           ON t.id = s.table_id
+                          AND t.restaurant_id = s.restaurant_id
+                         WHERE s.id = $1
+                           AND s.table_id = $2
+                           AND s.restaurant_id = $3
+                           AND s.status = 'active'
+                           AND t.status = 'occupied'
+                           AND t.room_code = s.room_code
+                         FOR UPDATE OF s, t`,
+                        [sessionId, table_id, restaurant_id]
+                    );
+                    if (activeSession.rows.length === 0) {
+                        const inactiveSessionError = new Error(
+                            'This table session has ended. Scan the table QR code again to start a new order.'
+                        );
+                        inactiveSessionError.statusCode = 409;
+                        throw inactiveSessionError;
+                    }
                 } else if (!sessionId) {
                     const sessionResult = await client.query(
                         `INSERT INTO order_sessions (table_id, restaurant_id, host_phone, status)
@@ -287,7 +310,7 @@ class OrderController {
 
         } catch (error) {
             console.error('Place Order Error:', error.message);
-            return res.status(500).json({
+            return res.status(error.statusCode || 500).json({
                 success: false,
                 message: error.message || 'Failed to place order'
             });

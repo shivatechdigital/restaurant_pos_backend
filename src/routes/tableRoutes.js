@@ -6,6 +6,9 @@ const { authenticate, authorize } = require('../middleware/auth');
 // Customer QR Scan karega
 router.get('/scan', TableController.scanTable);
 
+// Companion room PIN se active table session join karega
+router.post('/join', TableController.joinTable);
+
 // Customer OTP se table lock karega
 router.post('/lock', TableController.lockTable);
 
