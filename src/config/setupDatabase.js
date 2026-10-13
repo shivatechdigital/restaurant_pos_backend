@@ -21,6 +21,7 @@ const createTables = async () => {
             );
 
             ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS timezone VARCHAR(64) DEFAULT 'Asia/Kolkata';
+            ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS tagline VARCHAR(200) DEFAULT 'Good Food, Good Mood';
 
             -- =============================================
             -- 2. USERS (Admin, Waiter, Kitchen Staff)

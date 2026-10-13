@@ -293,7 +293,7 @@ class POSController {
 
     static async getPrintableOrder(orderId, restaurantId) {
         const orderResult = await query(
-            `SELECT o.*, r.name AS restaurant_name, r.address, r.phone AS restaurant_phone, r.gst_number, t.table_number
+            `SELECT o.*, r.name AS restaurant_name, COALESCE(r.tagline, '') AS tagline, r.address, r.phone AS restaurant_phone, r.gst_number, t.table_number
              FROM orders o
              JOIN restaurants r ON o.restaurant_id = r.id
              LEFT JOIN tables t ON o.table_id = t.id
@@ -328,6 +328,7 @@ class POSController {
             },
             restaurant: {
                 name: order.restaurant_name,
+                tagline: order.tagline,
                 address: order.address,
                 phone: order.restaurant_phone,
                 gst_number: order.gst_number

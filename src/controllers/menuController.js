@@ -105,10 +105,25 @@ class MenuController {
                 category.items = itemsByCategory.get(category.id) || [];
             }
 
+            const restResult = await query(
+                `SELECT id, name, COALESCE(tagline, '') AS tagline, COALESCE(address, '') AS address, COALESCE(phone, '') AS phone, COALESCE(gst_number, '') AS gst_number 
+                 FROM restaurants WHERE id = $1`,
+                [restaurant_id]
+            );
+            const restaurantInfo = restResult.rows[0] || {
+                id: parseInt(restaurant_id),
+                name: 'Restaurant',
+                tagline: '',
+                address: '',
+                phone: '',
+                gst_number: ''
+            };
+
             return res.status(200).json({
                 success: true,
                 data: {
                     restaurant_id: parseInt(restaurant_id),
+                    restaurant: restaurantInfo,
                     total_categories: categories.length,
                     total_items: categories.reduce((sum, cat) => sum + cat.items.length, 0),
                     menu: categories

@@ -730,15 +730,40 @@ class OrderController {
                 totalFinal += parseFloat(order.final_amount);
             }
 
-            // Table info
+            // Table & Restaurant info
             const sessionResult = await query(
-                `SELECT s.*, t.table_number, r.name AS restaurant_name
+                `SELECT s.*, t.table_number, 
+                        r.id AS restaurant_id,
+                        COALESCE(r.name, '') AS restaurant_name,
+                        COALESCE(r.tagline, '') AS restaurant_tagline,
+                        COALESCE(r.address, '') AS restaurant_address,
+                        COALESCE(r.phone, '') AS restaurant_phone,
+                        COALESCE(r.gst_number, '') AS restaurant_gst
                  FROM order_sessions s
-                 JOIN tables t ON s.table_id = t.id
-                 JOIN restaurants r ON r.id = s.restaurant_id
+                 LEFT JOIN tables t ON s.table_id = t.id
+                 LEFT JOIN restaurants r ON r.id = s.restaurant_id
                  WHERE s.id = $1`,
                 [session_id]
             );
+
+            let rData = sessionResult.rows[0] || {};
+            const restaurantId = rData.restaurant_id || ordersResult.rows[0]?.restaurant_id || 1;
+
+            if (!rData.restaurant_name) {
+                const restQuery = await query(
+                    `SELECT id, name, COALESCE(tagline, '') AS tagline, COALESCE(address, '') AS address, COALESCE(phone, '') AS phone, COALESCE(gst_number, '') AS gst_number 
+                     FROM restaurants WHERE id = $1`,
+                    [restaurantId]
+                );
+                if (restQuery.rows.length > 0) {
+                    const row = restQuery.rows[0];
+                    rData.restaurant_name = row.name;
+                    rData.restaurant_tagline = row.tagline;
+                    rData.restaurant_address = row.address;
+                    rData.restaurant_phone = row.phone;
+                    rData.restaurant_gst = row.gst_number;
+                }
+            }
 
             const paidResult = await query(
                 `SELECT COALESCE(SUM(amount), 0) AS paid_amount
@@ -749,9 +774,22 @@ class OrderController {
 
             const bill = {
                 session_id: parseInt(session_id),
-                table_number: sessionResult.rows[0]?.table_number,
-                restaurant_name: sessionResult.rows[0]?.restaurant_name,
-                host_phone: sessionResult.rows[0]?.host_phone,
+                table_number: rData.table_number || 'Online/Takeaway',
+                restaurant_id: restaurantId,
+                restaurant_name: rData.restaurant_name || 'Restaurant',
+                restaurant_tagline: rData.restaurant_tagline || '',
+                restaurant_address: rData.restaurant_address || '',
+                restaurant_phone: rData.restaurant_phone || '',
+                restaurant_gst: rData.restaurant_gst || '',
+                restaurant: {
+                    id: restaurantId,
+                    name: rData.restaurant_name || 'Restaurant',
+                    tagline: rData.restaurant_tagline || '',
+                    address: rData.restaurant_address || '',
+                    phone: rData.restaurant_phone || '',
+                    gst_number: rData.restaurant_gst || ''
+                },
+                host_phone: rData.host_phone || ordersResult.rows[0]?.ordered_by_phone,
                 orders: billOrders,
                 items: allItems,
                 summary: {
