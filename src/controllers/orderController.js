@@ -687,6 +687,95 @@ class OrderController {
         }
     }
 
+    // WAITER: ek order item ko individually served mark karo
+    static async serveOrderItem(req, res) {
+        const client = await pool.connect();
+        try {
+            const { order_id, item_id } = req.params;
+            await client.query('BEGIN');
+
+            const orderResult = await client.query(
+                `SELECT id, table_id, restaurant_id, status
+                 FROM orders WHERE id = $1 FOR UPDATE`,
+                [order_id]
+            );
+            if (orderResult.rows.length === 0) {
+                await client.query('ROLLBACK');
+                return res.status(404).json({ success: false, message: 'Order not found' });
+            }
+
+            const order = orderResult.rows[0];
+            if (Number(order.restaurant_id) !== Number(req.user.restaurant_id)) {
+                await client.query('ROLLBACK');
+                return res.status(403).json({ success: false, message: 'Order does not belong to your restaurant' });
+            }
+            if (order.status !== 'ready' && order.status !== 'served') {
+                await client.query('ROLLBACK');
+                return res.status(409).json({ success: false, message: 'Items can be served only after the order is ready' });
+            }
+
+            const itemResult = await client.query(
+                `UPDATE order_items
+                 SET status = 'served'
+                 WHERE id = $1 AND order_id = $2 AND status != 'cancelled'
+                 RETURNING id, status`,
+                [item_id, order_id]
+            );
+            if (itemResult.rows.length === 0) {
+                await client.query('ROLLBACK');
+                return res.status(404).json({ success: false, message: 'Order item not found' });
+            }
+
+            const remainingResult = await client.query(
+                `SELECT COUNT(*)::INT AS remaining
+                 FROM order_items
+                 WHERE order_id = $1 AND status != 'cancelled' AND status != 'served'`,
+                [order_id]
+            );
+            const isOrderServed = remainingResult.rows[0].remaining === 0;
+            const nextStatus = isOrderServed ? 'served' : order.status;
+
+            if (isOrderServed && order.status !== 'served') {
+                await client.query(
+                    `UPDATE orders SET status = 'served', served_at = COALESCE(served_at, NOW()) WHERE id = $1`,
+                    [order_id]
+                );
+            }
+            await client.query('COMMIT');
+
+            const io = req.app.get('io');
+            if (io) {
+                if (isOrderServed) {
+                    io.to(`table_${order.table_id}`).emit('order_status_update', {
+                        order_id: Number(order_id),
+                        status: 'served',
+                        message: '✅ Order serve ho gaya! Enjoy your meal!'
+                    });
+                }
+                io.to(`restaurant_${order.restaurant_id}`).emit('kitchen_order_update', {
+                    order_id: Number(order_id),
+                    status: nextStatus
+                });
+            }
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    order_id: Number(order_id),
+                    item_id: Number(item_id),
+                    item_status: 'served',
+                    order_status: nextStatus
+                }
+            });
+        } catch (error) {
+            await client.query('ROLLBACK').catch(() => {});
+            console.error('Serve order item error:', error.message);
+            return res.status(500).json({ success: false, message: 'Unable to update item serving status' });
+        } finally {
+            client.release();
+        }
+    }
+
     // =============================================
     // WAITER: TABLE KA BILL GENERATE KARO
     // =============================================

@@ -27,6 +27,7 @@ router.get('/kitchen', authenticate, authorize('admin', 'kitchen', 'waiter'), Or
 
 // Order status update (Kitchen/Waiter)
 router.patch('/:order_id/status', authenticate, authorize('admin', 'kitchen', 'waiter'), OrderController.updateOrderStatus);
+router.patch('/:order_id/items/:item_id/serve', authenticate, authorize('admin', 'waiter'), OrderController.serveOrderItem);
 
 // =============================================
 // WAITER ROUTES
